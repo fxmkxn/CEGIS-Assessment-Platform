@@ -56,6 +56,48 @@
    Load order (unchanged): AFTER participant.js and wpca.js, BEFORE app.js.
    ============================================================ */
 
+/* ============================================================
+   v3 CHANGES  (report restructure, matches the v3 generate-report Edge
+   Function)
+
+   1. SCHEMA GUARD bumped 2 -> 3 (REPORT_SCHEMA_VERSION). Every report
+      generated under the old contract now shows the existing "needs
+      updating" card instead of rendering with missing/renamed fields.
+
+   2. "eoca" SECTION RENAMED "progression" throughout (SECTION_HTML,
+      SECTION_PDF, and the SVG generator eocaBarsSVG -> progressionBarsSVG).
+      It now draws baseline, every EOCA sitting, AND endline as one bar
+      chart in that order — not EOCA-only — so bars are coloured by `kind`
+      (baseline/eoca/endline) via PROGRESSION_BAR_COLORS, with baseline and
+      endline standing out from the EOCA sittings in between.
+
+   3. WPCA IS NOW MULTI-ROUND. `data.rounds` is an array (was a single
+      round's fields spread directly on `data`). More than one completed
+      round renders as a small tab bar (reportsWpcaShowRound); a single
+      round renders with no tab bar at all, so the common case looks
+      unchanged apart from the new chart type below.
+
+   4. LOLLIPOP CHARTS (one per rater group) ARE RETIRED, replaced by
+      wpcaDotChartSVG — ONE chart per round with all three rater groups
+      merged onto the same rows (_wpcaMergeByCompetency), competency down
+      the y axis, percentage along the x axis, colour-coded dots. A
+      competency with no peer or no manager rating for it simply has no
+      dot in that colour — nothing is invented or zeroed. Scores arrive as
+      percentages already (the Edge Function converts them), so this
+      module still never computes a score of its own.
+
+   5. REMOVED: the "Derived from the ratings" box (application_band /
+      development_focus) and the entire "Per-competency performance"
+      section (SECTION_HTML.per_competency / SECTION_PDF.per_competency).
+      The underlying fields may still arrive in the payload for diagnostic
+      purposes; this file just no longer reads them for either.
+
+   6. METRIC TILES REMOVED from the summary band (_metricTiles is gone,
+      both HTML and PDF). The summary paragraph itself now covers what the
+      tiles used to show (assessment counts, baseline->endline change) as
+      prose written by the Edge Function.
+   ============================================================ */
+
 /* keep the prototype implementations for DEMO mode (no backend) */
 var REPORTS_PROTO = {
   pReport:      window.pReport,
@@ -83,7 +125,7 @@ var REPORTS = {
 };
 
 /* the only report shape this file can draw */
-var REPORT_SCHEMA_VERSION = 2;
+var REPORT_SCHEMA_VERSION = 3;
 
 function reportsLive(){ return !!(window.SUPABASE_CONFIGURED && window.sb); }
 function rEsc(s){ return String(s==null?'':s)
@@ -92,6 +134,9 @@ function rEsc(s){ return String(s==null?'':s)
 /* Is this content object something we can render?
    Checked in three places (participant hydrate, admin open, renderReportFrom)
    because a wrong answer here is a blank page rather than a caught error. */
+// Name predates the v3 bump (kept as-is to avoid touching its several call
+// sites for a rename with no behaviour change) — it checks against whatever
+// REPORT_SCHEMA_VERSION currently is, not literally "2".
 function reportsIsV2(content){
   return !!content
     && content.schema_version === REPORT_SCHEMA_VERSION
@@ -128,6 +173,16 @@ var WPCAS_GROUP_COLORS = {
   self:    RCOLORS.primary,
   peer:    RCOLORS.secondary,
   manager: RCOLORS.accent
+};
+
+/* one colour per progression-bar kind (v3). Baseline and endline get the
+   same colours the radar already uses for them, so the two charts read as
+   the same story; EOCA sittings in between get a neutral grey so the two
+   "bookend" checkpoints stand out from the sittings in the middle. */
+var PROGRESSION_BAR_COLORS = {
+  baseline: RCOLORS.secondary,
+  eoca:     RCOLORS.axis,
+  endline:  RCOLORS.primary
 };
 
 /* ============================================================
@@ -233,12 +288,18 @@ function techRadarSVG(d){
 }
 
 /* ============================================================
-   PURE SVG GENERATOR 2 — EOCA BAR CHART
-   One bar per EOCA sitting. Name on x, percentage on y.
+   PURE SVG GENERATOR 2 — PROGRESSION BAR CHART (v3, renamed from
+   eocaBarsSVG)
+   One bar per checkpoint: baseline, every EOCA sitting, endline — in
+   that order, straight from the Edge Function's `bars` array. Name on x,
+   percentage on y. Each bar is coloured by `kind` (PROGRESSION_BAR_COLORS)
+   so baseline/endline stand out from the EOCA sittings in between; a bar
+   with no `kind` (shouldn't happen, but cheap to guard) falls back to the
+   old flat primary colour.
    Objectives are deliberately not shown — the raw Obj/S2-Obj codes are
    unresolved in the objectives table and mean nothing to a participant.
    ============================================================ */
-function eocaBarsSVG(bars){
+function progressionBarsSVG(bars){
   if(!bars || !bars.length) return null;
 
   const W=560, PL=36, PR=14, PT=16, PB=48;
@@ -262,7 +323,8 @@ function eocaBarsSVG(bars){
     const x0=cxBar-barW/2;
     const v=Number(b.pct);
     const top=y(v);
-    return `<rect x="${x0}" y="${top}" width="${barW}" height="${Math.max(1,y(0)-top)}" rx="3" fill="${RCOLORS.primary}"/>`
+    const fill=PROGRESSION_BAR_COLORS[b.kind] || RCOLORS.primary;
+    return `<rect x="${x0}" y="${top}" width="${barW}" height="${Math.max(1,y(0)-top)}" rx="3" fill="${fill}"/>`
       + `<text x="${cxBar}" y="${top-5}" font-size="10.5" fill="${RCOLORS.label}" text-anchor="middle">${v}%</text>`
       + `<text font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${_wrap2(b.name, cxBar, H-PB+16, maxChars)}</text>`;
   }).join('');
@@ -272,70 +334,85 @@ function eocaBarsSVG(bars){
 }
 
 /* ============================================================
-   PURE SVG GENERATOR 3 — LOLLIPOP CHART
-   One chart per rater group. Competency names down the y axis, score
-   along the x axis. A "lollipop" is just a horizontal line from the
-   scale minimum out to the score, with a filled circle at the end —
-   easier to read than a bar when the baseline isn't zero, which it
-   isn't here because the Likert scale starts at 1.
+   PURE SVG GENERATOR 3 — WPCA MERGED DOT CHART (v3, replaces lollipopSVG)
+
+   ONE chart per round instead of one lollipop per rater group. Competency
+   names down the y axis, PERCENTAGE (0-100) along the x axis — scores
+   arrive already converted from the Edge Function, this file does not
+   compute one. Up to three small dots per row, colour-coded by rater
+   group (WPCAS_GROUP_COLORS), nudged apart vertically so they don't fully
+   overlap when two groups land on the same score. A competency with no
+   rating from a group simply has no dot in that colour.
+
+   _wpcaMergeByCompetency does the reshaping: the Edge Function still ships
+   one array per rater group (self/peer/manager), each holding that
+   group's points; this pivots them into one row per competency with up
+   to three named fields. That's array reshaping, not scoring — it doesn't
+   touch any number, so it doesn't break the "this module never computes a
+   score" rule above.
    ============================================================ */
-function lollipopSVG(chart, scale){
-  const pts=(chart && chart.points) || [];
-  if(!pts.length) return null;
+function _wpcaMergeByCompetency(charts){
+  const byComp = {};
+  const order = [];   // preserve first-seen competency order
+  (charts||[]).forEach(c=>{
+    (c.points||[]).forEach(p=>{
+      if(p.pct==null) return;                 // no rating: leave this dot out
+      if(!(p.competency in byComp)){ byComp[p.competency]={}; order.push(p.competency); }
+      byComp[p.competency][c.key]=p.pct;
+    });
+  });
+  return order.map(comp=>Object.assign({competency:comp}, byComp[comp]));
+}
 
-  const min=(scale && scale.min!=null) ? scale.min : 1;
-  // Fallback of 3 matches the WPCAS instrument, but it should never be
-  // reached — the Edge Function reads the real scale from the instrument and
-  // ships it inside the report. An earlier version defaulted to 5, which
-  // squeezed every score into the lower half of the axis.
-  const max=(scale && scale.max!=null) ? scale.max : 3;
-  const labels=(scale && Array.isArray(scale.labels)) ? scale.labels : [];
-  const colour=WPCAS_GROUP_COLORS[chart.key] || RCOLORS.primary;
+function wpcaDotChartSVG(rows){
+  if(!rows || !rows.length) return null;
 
-  const W=560, PL=196, PR=44, PT=14, ROW=26;
-  // Room at the bottom for two lines: the scale numbers, then the anchor
-  // legend explaining what those numbers mean.
-  const legendH = labels.length ? 30 : 16;
-  const rowsH = pts.length*ROW;
-  const H=PT + rowsH + legendH;
+  const W=560, PL=196, PR=20, PT=14, ROW=32;
+  const legendH=26;
+  const rowsH=rows.length*ROW;
+  const H=PT+rowsH+legendH;
   const plotW=W-PL-PR;
 
-  const x=v=>PL + ((v-min)/(max-min))*plotW;
-  const y=i=>PT + i*ROW + ROW/2;
-  const numY = PT + rowsH + 14;
+  const x=v=>PL+(v/100)*plotW;
+  const y=i=>PT+i*ROW+ROW/2;
 
-  // A vertical gridline and number at each whole point on the scale.
-  let ticks='';
-  for(let v=min; v<=max; v++){
-    ticks += `<line x1="${x(v)}" y1="${PT}" x2="${x(v)}" y2="${PT+rowsH}" stroke="${RCOLORS.grid}"/>`
-           + `<text x="${x(v)}" y="${numY}" font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${v}</text>`;
-  }
+  // Gridline + number at 0/25/50/75/100 — the axis is always 0-100 now,
+  // never the instrument's raw scale, so this needs no scale parameter.
+  const ticks=[0,25,50,75,100].map(v=>
+    `<line x1="${x(v)}" y1="${PT}" x2="${x(v)}" y2="${PT+rowsH}" stroke="${RCOLORS.grid}"/>`
+    + `<text x="${x(v)}" y="${PT+rowsH+14}" font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${v}%</text>`
+  ).join('');
 
-  // The anchor legend. "2.4 out of 3" tells a participant nothing; naming the
-  // anchors tells them what their raters actually selected. Rendered as one
-  // centred line so it cannot collide with the tick numbers above it.
-  let legend='';
-  if(labels.length){
-    const full=labels.map((l,i)=>`${i+1} ${l}`).join('  ·  ');
-    // Long instruments would overflow the width, so drop to the two endpoints.
-    const text = full.length<=115
-      ? full
-      : `${1} ${labels[0]}  →  ${labels.length} ${labels[labels.length-1]}`;
-    legend=`<text x="${W/2}" y="${H-4}" font-size="8.5" fill="${RCOLORS.axis}" text-anchor="middle">${rEsc(text)}</text>`;
-  }
+  // Small vertical stagger so self/peer/manager dots don't fully overlap
+  // when two groups gave the same score.
+  const OFFSET={ self:-8, peer:0, manager:8 };
 
-  const rows=pts.map((p,i)=>{
-    const v=Number(p.score);
+  const rowsSvg=rows.map((r,i)=>{
     const yy=y(i);
-    return `<text x="${PL-12}" y="${yy+3.5}" font-size="10.5" fill="${RCOLORS.label}" text-anchor="end">`
-         + `<title>${rEsc(p.competency)}</title>${_clip(p.competency,32)}</text>`
-         + `<line x1="${x(min)}" y1="${yy}" x2="${x(v)}" y2="${yy}" stroke="${colour}" stroke-width="2" stroke-linecap="round"/>`
-         + `<circle cx="${x(v)}" cy="${yy}" r="5" fill="${colour}"/>`
-         + `<text x="${x(v)+11}" y="${yy+3.5}" font-size="10.5" fill="${RCOLORS.label}">${v}</text>`;
+    const label=`<text x="${PL-12}" y="${yy+3.5}" font-size="10.5" fill="${RCOLORS.label}" text-anchor="end">`
+      + `<title>${rEsc(r.competency)}</title>${_clip(r.competency,32)}</text>`;
+    const dots=['self','peer','manager'].map(k=>{
+      const v=r[k];
+      if(v==null) return '';
+      return `<circle cx="${x(v)}" cy="${yy+OFFSET[k]}" r="4.5" fill="${WPCAS_GROUP_COLORS[k]}"/>`;
+    }).join('');
+    return label+dots;
+  }).join('');
+
+  // One shared legend under the whole chart rather than per row — the
+  // colours are the same for every competency.
+  const legendY=PT+rowsH+legendH-8;
+  const items=[['self','Self'],['peer','Peer'],['manager','Manager']];
+  let lx=W/2-95;
+  const legend=items.map(([k,lab])=>{
+    const chip=`<circle cx="${lx+6}" cy="${legendY}" r="4.5" fill="${WPCAS_GROUP_COLORS[k]}"/>`
+      + `<text x="${lx+16}" y="${legendY+3.5}" font-size="10" fill="${RCOLORS.label}">${lab}</text>`;
+    lx+=65;
+    return chip;
   }).join('');
 
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg">`
-    + ticks + rows + legend + `</svg>`;
+    + ticks + rowsSvg + legend + `</svg>`;
 }
 
 /* ============================================================
@@ -374,24 +451,10 @@ function firstSvg(html){ if(!html) return null; const a=html.indexOf('<svg'); co
    a new section before the front end knows about it without breaking.
    ============================================================ */
 
-function _metricTiles(m){
-  if(!m) return '';
-  const gain = m.technical_gain_pct==null ? '—' : (m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%';
-  // Scale comes from metrics, so the tile cannot claim "of 5" on a 1-3
-  // instrument. Falls back to a bare number if the scale is unknown, which
-  // is better than asserting a wrong denominator.
-  const wpMax = m.wpcas_scale_max;
-  const wp   = m.wpcas_overall==null ? '—' : m.wpcas_overall;
-  const wpLbl = wpMax ? `WPCAS overall (of ${wpMax})` : 'WPCAS overall';
-  const stg  = m.stages_completed_pct==null ? '—' : m.stages_completed_pct+'%';
-  const r    = m.raters || {};
-  const tot  = (r.self||0)+(r.peer||0)+(r.manager||0);
-  return `<div class="metric-tiles">
-    <div class="mt"><div class="v tnum">${gain}</div><div class="l">Technical gain (baseline→endline)</div></div>
-    <div class="mt"><div class="v tnum">${wp}</div><div class="l">${wpLbl}</div></div>
-    <div class="mt"><div class="v tnum">${stg}</div><div class="l">Stages completed</div></div>
-    <div class="mt"><div class="v tnum">${tot}</div><div class="l">Raters · 360</div></div></div>`;
-}
+/* _metricTiles REMOVED (v3) — the summary band no longer shows the
+   technical-gain / WPCAS-overall / stages-completed / raters boxes. The
+   summary paragraph itself (data.narrative below) now covers assessment
+   counts and the baseline->endline change as prose. */
 
 /* Compact competency table used under the technical radar. Inline styles
    because the stylesheet has no table class. */
@@ -431,12 +494,14 @@ var SECTION_HTML = {
 
   summary: function(data, content){
     const s=content.subject||{};
+    // v3: metric tiles removed — the narrative paragraph (written by the
+    // Edge Function from assessment_counts + technical_gain_pct) now covers
+    // what those boxes used to show.
     return `<div class="summary-band"><div>
       <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦ AI-generated</div>
       <h1 style="color:#fff;margin:10px 0 4px">${rEsc(s.name||'')} — ${content.type==='stage'?'Stage report':'Lifecycle report'}</h1>
       <div style="opacity:.85;font-size:13px">${rEsc(s.meta||'')}${s.cohort_name?' · '+rEsc(s.cohort_name):''}</div></div>
-      <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(data.narrative||'')}</p>
-      ${_metricTiles(content.metrics)}</div>`;
+      <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(data.narrative||'')}</p></div>`;
   },
 
   technical: function(data){
@@ -457,69 +522,62 @@ var SECTION_HTML = {
       ${_aiBlock('AI interpretation', data.narrative)}`;
   },
 
-  eoca: function(data){
-    const svg=eocaBarsSVG(data.bars);
-    return `<p class="muted small" style="margin-bottom:12px">Percentage score in each end-of-course assessment.</p>
+  // RENAMED from "eoca" (v3) — bars now cover baseline + every EOCA sitting
+  // + endline, not EOCA alone, matching the Edge Function's renamed section.
+  progression: function(data){
+    const svg=progressionBarsSVG(data.bars);
+    return `<p class="muted small" style="margin-bottom:12px">Percentage score across baseline, each end-of-course assessment, and endline.</p>
       ${svg?`<div class="card pad">${svg}</div>`:''}
       ${_aiBlock('AI interpretation', data.narrative)}`;
   },
 
+  // REWRITTEN for v3: `data.rounds` is now an array (was single-round
+  // fields spread on `data`). More than one completed round renders as a
+  // small tab bar; a single round renders with no tab bar, so the common
+  // case looks the same as before apart from the new chart. The old
+  // "Derived from the ratings" box is gone — application_band/
+  // development_focus may still arrive per round but this file no longer
+  // renders them.
   wpcas: function(data){
-    const charts=(data.charts||[]).map(c=>{
-      const svg=lollipopSVG(c, data.scale);
-      if(!svg) return '';
-      // n_raters is shown so the reader can weigh the number. A peer average
-      // over three people and a single manager rating are different kinds of
-      // evidence and should not look identical on the page.
-      const n = c.n_raters===1 ? '1 rater' : (c.n_raters||0)+' raters';
-      return `<div class="card pad" style="margin-top:12px">
-        <div class="flex ac jb" style="margin-bottom:6px">
-          <b style="font-size:13px">${rEsc(c.label)}</b>
-          <span class="tag">${n}</span></div>${svg}</div>`;
+    const rounds=data.rounds||[];
+    if(!rounds.length) return '';
+
+    const tabs = rounds.length>1
+      ? `<div class="flex g8" style="margin-bottom:10px;flex-wrap:wrap" id="wpcaTabs">`
+        + rounds.map((r,i)=>`<button type="button" class="btn ghost sm${i===0?' on':''}"
+            onclick="reportsWpcaShowRound(this,${i})">${rEsc(r.round_name||'Round '+(i+1))}</button>`).join('')
+        + `</div>`
+      : '';
+
+    const panels = rounds.map((r,i)=>{
+      const merged=_wpcaMergeByCompetency(r.charts);
+      const svg=wpcaDotChartSVG(merged);
+      const sc=r.scale||{};
+      const scMin=sc.min!=null?sc.min:1, scMax=sc.max!=null?sc.max:3;
+      const roundLabel = rounds.length>1 ? '' : (r.round_name ? `Round: ${rEsc(r.round_name)}. ` : '');
+      const note=`<p class="muted small" style="margin-bottom:4px">${roundLabel}Scores are shown as a percentage of the ${scMin}\u2013${scMax}-point rating scale.</p>`;
+      return `<div data-wpca-panel="${i}" style="${i===0?'':'display:none'}">
+        ${note}
+        ${svg?`<div class="card pad">${svg}</div>`:'<p class="muted small">No ratings to chart for this round.</p>'}
+      </div>`;
     }).join('');
 
-    const band=data.application_band;
-    const focus=data.development_focus||[];
-    const derived=(band || focus.length) ? `<div class="card pad" style="margin-top:12px">
-        <span class="ai-label">✦ Derived from the ratings</span>
-        <div class="rep-2col" style="margin-top:10px">
-          <div><div class="muted small">Overall application</div><b>${rEsc(band||'—')}</b></div>
-          <div><div class="muted small">Development focus (2 lowest)</div><b>${focus.map(rEsc).join(' · ')||'—'}</b></div>
-        </div></div>` : '';
-
-    // Describe the scale from the report's own data. Hardcoding "1-5" here
-    // was wrong: the WPCAS instrument has three anchors, not five.
-    const sc=data.scale||{};
-    const scMin=sc.min!=null?sc.min:1, scMax=sc.max!=null?sc.max:3;
-    const scaleNote=`Scores are on a ${scMin}–${scMax} scale.`;
-    const roundNote = data.round_name
-      ? `<p class="muted small" style="margin-bottom:4px">Round: ${rEsc(data.round_name)}. ${scaleNote}</p>`
-      : `<p class="muted small" style="margin-bottom:4px">${scaleNote}</p>`;
-
-    return `${roundNote}${charts}${derived}${_aiBlock('AI synthesis', data.narrative)}`;
+    return `${tabs}${panels}${_aiBlock('AI synthesis', data.narrative)}`;
   },
 
-  per_competency: function(data){
-    const rows=(data.rows||[]).map(r=>{
-      const bit=(lab,v)=>v==null?'':`<span class="tag" style="margin-right:6px">${lab} ${v}</span>`;
-      return `<div class="ai-block" style="margin-top:10px">
-        <span class="ai-label">✦ ${rEsc(r.competency)}</span>
-        <div style="margin:8px 0 0">
-          ${r.technical_pct==null?'':`<span class="tag" style="margin-right:6px">Technical ${r.technical_pct}%</span>`}
-          ${bit('Self',r.self)}${bit('Peer',r.peer)}${bit('Manager',r.manager)}
-        </div>
-        ${r.commentary?`<p style="margin:8px 0 0">${rEsc(r.commentary)}</p>`:''}</div>`;
-    }).join('');
-    return `<p class="muted small" style="margin-bottom:4px">Technical score and 360 ratings side by side, for competencies measured by both.</p>${rows}`;
-  },
+  // per_competency section REMOVED (v3) — no renderer needed; the Edge
+  // Function no longer pushes this section at all.
 
   strengths_gaps: function(data){
     const strengths=(data.strengths||[]).map(x=>`<li>${rEsc(x)}</li>`).join('');
     const devs=(data.development_areas||[]).map(x=>`<li>${rEsc(x)}</li>`).join('');
+    // v3: "Development areas" uses the neutral "info" badge instead of the
+    // amber "warn" one — the content is meant to read as supportive framing,
+    // and an amber/warning-coloured badge fought that regardless of wording.
     return `<div class="rep-2col">
       <div class="card pad"><div class="badge ok" style="margin-bottom:8px">Strengths</div>
         <ul style="margin:0;padding-left:18px">${strengths||'<li class="muted">—</li>'}</ul></div>
-      <div class="card pad"><div class="badge warn" style="margin-bottom:8px">Development areas</div>
+      <div class="card pad"><div class="badge info" style="margin-bottom:8px">Development areas</div>
         <ul style="margin:0;padding-left:18px">${devs||'<li class="muted">—</li>'}</ul></div></div>`;
   },
 
@@ -540,6 +598,22 @@ function reportsNeedsUpdateCard(opts){
     <h3 style="margin:8px 0">This report needs updating</h3>
     <p class="muted" style="margin:0 auto 16px;max-width:460px">It was generated in an older format. Updating rebuilds it with the current sections and charts.</p>
     ${btn}</div>`;
+}
+
+/* WPCA round tabs (v3). All rounds' HTML is already rendered into the DOM
+   at once (see SECTION_HTML.wpcas) — clicking a tab just toggles which
+   `[data-wpca-panel]` is visible and which tab button carries the "on"
+   style, the same pattern initReportScroll uses for the section nav below.
+   Scoped to the nearest <section> so this can never affect a different
+   report section by accident. */
+function reportsWpcaShowRound(btn, idx){
+  const bar=btn.closest('#wpcaTabs');
+  if(bar) bar.querySelectorAll('button').forEach(b=>b.classList.toggle('on', b===btn));
+  const host=btn.closest('section');
+  if(!host) return;
+  host.querySelectorAll('[data-wpca-panel]').forEach(p=>{
+    p.style.display = (p.getAttribute('data-wpca-panel')===String(idx)) ? '' : 'none';
+  });
 }
 
 function renderReportFrom(content, opts){
@@ -848,7 +922,7 @@ async function _pdfLogoDataUrl(path){
 var SECTION_PDF = {
 
   summary: function(data, content, stack){
-    const s=content.subject||{}, m=content.metrics||{};
+    const s=content.subject||{};
     stack.push({ columns:[
       { width:11, svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', margin:[0,1,0,0] },
       { width:'*', text:'AI-GENERATED', fontSize:8, bold:true, color:RCOLORS.primary }
@@ -857,18 +931,8 @@ var SECTION_PDF = {
     const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
     if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
     if(data.narrative) stack.push({ text:data.narrative, fontSize:10.5, lineHeight:1.3, margin:[0,0,0,8] });
-
-    const r=m.raters||{};
-    const tiles=[
-      ['Technical gain', m.technical_gain_pct==null?'—':(m.technical_gain_pct>=0?'+':'')+m.technical_gain_pct+'%'],
-      ['WPCAS overall',  m.wpcas_overall==null?'—':String(m.wpcas_overall)+(m.wpcas_scale_max?' / '+m.wpcas_scale_max:'')],
-      ['Stages done',    m.stages_completed_pct==null?'—':m.stages_completed_pct+'%'],
-      ['Raters · 360',   String((r.self||0)+(r.peer||0)+(r.manager||0))]
-    ];
-    stack.push({ columns: tiles.map(([l,v])=>({ width:'*', stack:[
-      { text:v, fontSize:13, bold:true, color:'#013d57' },
-      { text:l, fontSize:8, color:'#64748b' }
-    ]})), columnGap:10, margin:[0,0,0,10] });
+    // v3: metric tiles removed here too — see the matching change in
+    // SECTION_HTML.summary for why.
   },
 
   technical: function(data, content, stack){
@@ -900,51 +964,42 @@ var SECTION_PDF = {
     if(data.narrative) stack.push(_pdfAI(data.narrative));
   },
 
-  eoca: function(data, content, stack){
-    stack.push(_pdfH2('EOCA performance'));
-    const svg=eocaBarsSVG(data.bars);
+  // RENAMED from "eoca" (v3) — see the matching HTML renderer.
+  progression: function(data, content, stack){
+    stack.push(_pdfH2('Assessment progression'));
+    const svg=progressionBarsSVG(data.bars);
     if(svg) stack.push({ svg:_pdfCleanSvg(svg), width:400, alignment:'center', margin:[0,4,0,4] });
     if(data.narrative) stack.push(_pdfAI(data.narrative));
   },
 
+  // REWRITTEN for v3: data.rounds is now an array. The PDF has no tabs, so
+  // every completed round is printed one after another, each labelled with
+  // its round name when there's more than one. "Derived from the ratings"
+  // (application_band/development_focus) is dropped, matching the HTML side.
   wpcas: function(data, content, stack){
     stack.push(_pdfH2('WPCAS 360 ratings'));
-    (data.charts||[]).forEach(c=>{
-      const svg=lollipopSVG(c, data.scale);
-      if(!svg) return;
-      const n = c.n_raters===1 ? '1 rater' : (c.n_raters||0)+' raters';
-      stack.push({ text:`${c.label} · ${n}`, fontSize:9, bold:true, color:'#01536f', margin:[0,6,0,2] });
-      stack.push({ svg:_pdfCleanSvg(svg), width:420, alignment:'center', margin:[0,0,0,4] });
+    const rounds=data.rounds||[];
+    rounds.forEach((r)=>{
+      if(rounds.length>1){
+        stack.push({ text:r.round_name||'Round', fontSize:10, bold:true, color:'#01536f', margin:[0,6,0,2] });
+      }
+      const merged=_wpcaMergeByCompetency(r.charts);
+      const svg=wpcaDotChartSVG(merged);
+      if(svg) stack.push({ svg:_pdfCleanSvg(svg), width:420, alignment:'center', margin:[0,0,0,4] });
     });
-    if(data.application_band || (data.development_focus||[]).length){
-      stack.push({ columns:[
-        { width:'*', stack:[{ text:'Overall application', fontSize:8, color:'#64748b' }, { text:data.application_band||'—', fontSize:10, bold:true }] },
-        { width:'*', stack:[{ text:'Development focus', fontSize:8, color:'#64748b' }, { text:(data.development_focus||[]).join(' · ')||'—', fontSize:10, bold:true }] }
-      ], columnGap:16, margin:[0,4,0,4] });
-    }
     if(data.narrative) stack.push(_pdfAI(data.narrative));
   },
 
-  per_competency: function(data, content, stack){
-    stack.push(_pdfH2('Per-competency performance'));
-    (data.rows||[]).forEach(r=>{
-      const bits=[];
-      if(r.technical_pct!=null) bits.push('Technical '+r.technical_pct+'%');
-      if(r.self!=null)    bits.push('Self '+r.self);
-      if(r.peer!=null)    bits.push('Peer '+r.peer);
-      if(r.manager!=null) bits.push('Manager '+r.manager);
-      stack.push({ text:r.competency||'', bold:true, fontSize:10, color:'#01536f', margin:[0,6,0,1] });
-      if(bits.length) stack.push({ text:bits.join('  ·  '), fontSize:8.5, color:'#64748b', margin:[0,0,0,2] });
-      if(r.commentary) stack.push({ text:r.commentary, fontSize:10, lineHeight:1.3 });
-    });
-  },
+  // per_competency section REMOVED (v3) — no builder needed.
 
   strengths_gaps: function(data, content, stack){
     stack.push(_pdfH2('Strengths & development areas'));
     const strengths=data.strengths||[], devs=data.development_areas||[];
+    // v3: "Development areas" heading recoloured from the amber/warn hex to
+    // the same indigo the HTML side's new "info" badge uses.
     stack.push({ columns:[
       { width:'*', stack:[{ text:'Strengths', bold:true, fontSize:9, color:'#2a7040', margin:[0,2,0,3] }, strengths.length?{ ul:strengths, fontSize:10 }:{ text:'—', color:'#94a3b8' }] },
-      { width:'*', stack:[{ text:'Development areas', bold:true, fontSize:9, color:'#8a6406', margin:[0,2,0,3] }, devs.length?{ ul:devs, fontSize:10 }:{ text:'—', color:'#94a3b8' }] }
+      { width:'*', stack:[{ text:'Development areas', bold:true, fontSize:9, color:'#01536f', margin:[0,2,0,3] }, devs.length?{ ul:devs, fontSize:10 }:{ text:'—', color:'#94a3b8' }] }
     ], columnGap:16 });
   },
 
