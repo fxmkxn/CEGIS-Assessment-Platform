@@ -339,10 +339,11 @@ function progressionBarsSVG(bars){
    ONE chart per round instead of one lollipop per rater group. Competency
    names down the y axis, PERCENTAGE (0-100) along the x axis — scores
    arrive already converted from the Edge Function, this file does not
-   compute one. Up to three small dots per row, colour-coded by rater
-   group (WPCAS_GROUP_COLORS), nudged apart vertically so they don't fully
-   overlap when two groups land on the same score. A competency with no
-   rating from a group simply has no dot in that colour.
+   compute one. Up to three small dots per row, ALL ON THE SAME LINE
+   (colour-coded by rater group, WPCAS_GROUP_COLORS) — if two groups land
+   on the same score their dots simply overlap rather than being staggered
+   apart. A light grey line ties each competency name to its row of dots.
+   A competency with no rating from a group simply has no dot in that colour.
 
    _wpcaMergeByCompetency does the reshaping: the Edge Function still ships
    one array per rater group (self/peer/manager), each holding that
@@ -368,7 +369,10 @@ function wpcaDotChartSVG(rows){
   if(!rows || !rows.length) return null;
 
   const W=560, PL=196, PR=20, PT=14, ROW=32;
-  const legendH=26;
+  // Gap between the axis-number row and the legend below it — kept as its
+  // own constant so the two stay comfortably apart rather than crowding.
+  const legendGap=34;
+  const legendH=legendGap+16;
   const rowsH=rows.length*ROW;
   const H=PT+rowsH+legendH;
   const plotW=W-PL-PR;
@@ -383,25 +387,26 @@ function wpcaDotChartSVG(rows){
     + `<text x="${x(v)}" y="${PT+rowsH+14}" font-size="10" fill="${RCOLORS.axis}" text-anchor="middle">${v}%</text>`
   ).join('');
 
-  // Small vertical stagger so self/peer/manager dots don't fully overlap
-  // when two groups gave the same score.
-  const OFFSET={ self:-8, peer:0, manager:8 };
-
   const rowsSvg=rows.map((r,i)=>{
     const yy=y(i);
     const label=`<text x="${PL-12}" y="${yy+3.5}" font-size="10.5" fill="${RCOLORS.label}" text-anchor="end">`
       + `<title>${rEsc(r.competency)}</title>${_clip(r.competency,32)}</text>`;
+    // A light grey line ties the competency name back to its row of dots —
+    // drawn full-width and BEFORE the dots so the dots sit on top of it.
+    const guide=`<line x1="${x(0)}" y1="${yy}" x2="${x(100)}" y2="${yy}" stroke="${RCOLORS.grid}"/>`;
+    // Self/peer/manager now sit on the SAME line (no vertical stagger) —
+    // if two groups gave the same score their dots simply overlap.
     const dots=['self','peer','manager'].map(k=>{
       const v=r[k];
       if(v==null) return '';
-      return `<circle cx="${x(v)}" cy="${yy+OFFSET[k]}" r="4.5" fill="${WPCAS_GROUP_COLORS[k]}"/>`;
+      return `<circle cx="${x(v)}" cy="${yy}" r="4.5" fill="${WPCAS_GROUP_COLORS[k]}"/>`;
     }).join('');
-    return label+dots;
+    return label+guide+dots;
   }).join('');
 
-  // One shared legend under the whole chart rather than per row — the
-  // colours are the same for every competency.
-  const legendY=PT+rowsH+legendH-8;
+  // Shared legend, comfortably below the axis numbers rather than crowded
+  // against them.
+  const legendY=PT+rowsH+legendGap;
   const items=[['self','Self'],['peer','Peer'],['manager','Manager']];
   let lx=W/2-95;
   const legend=items.map(([k,lab])=>{
@@ -482,11 +487,15 @@ function _compTable(rows){
       </tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
+// `label` is still accepted (call sites are unchanged, e.g. _aiBlock('AI
+// synthesis', ...)) but no longer displayed — every AI-written box now
+// shows just the ✦ symbol instead of a repeated "AI interpretation" /
+// "AI synthesis" / "AI-generated" pill on every single box.
 function _aiBlock(label, text, teal){
   if(!text) return '';
   const style = teal ? ' style="border-color:var(--teal);background:#eef6f0"' : '';
   const lab   = teal ? ' style="background:#dcf0e3;color:#1f5b34"' : '';
-  return `<div class="ai-block"${style}><span class="ai-label"${lab}>✦ ${rEsc(label)}</span>
+  return `<div class="ai-block"${style}><span class="ai-label"${lab}>✦</span>
     <p style="margin:8px 0 0">${rEsc(text)}</p></div>`;
 }
 
@@ -498,7 +507,7 @@ var SECTION_HTML = {
     // Edge Function from assessment_counts + technical_gain_pct) now covers
     // what those boxes used to show.
     return `<div class="summary-band"><div>
-      <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦ AI-generated</div>
+      <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦</div>
       <h1 style="color:#fff;margin:10px 0 4px">${rEsc(s.name||'')} — ${content.type==='stage'?'Stage report':'Lifecycle report'}</h1>
       <div style="opacity:.85;font-size:13px">${rEsc(s.meta||'')}${s.cohort_name?' · '+rEsc(s.cohort_name):''}</div></div>
       <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(data.narrative||'')}</p></div>`;
@@ -662,7 +671,7 @@ function renderReportFrom(content, opts){
         <div class="flex g8 ac">${backBtn}${regenBtn}
           <button class="btn ghost sm" id="exportPdfBtn" onclick="exportReport()">⤓ Export PDF</button></div></div>
       ${body}
-      <p class="muted small" style="margin-top:16px">Narrative sections are generated from server-scored results and the question blueprint${genAt?' · generated '+rEsc(genAt):''}.</p>
+      <p class="muted small" style="margin-top:16px">Narrative sections are AI-generated from your results${genAt?' · '+rEsc(genAt):''}.</p>
     </div></div></div>`;
 }
 
@@ -923,10 +932,9 @@ var SECTION_PDF = {
 
   summary: function(data, content, stack){
     const s=content.subject||{};
-    stack.push({ columns:[
-      { width:11, svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', margin:[0,1,0,0] },
-      { width:'*', text:'AI-GENERATED', fontSize:8, bold:true, color:RCOLORS.primary }
-    ], columnGap:3, margin:[0,0,0,3] });
+    // v3: just the ✦ diamond icon now, no "AI-GENERATED" text next to it —
+    // matches the HTML side's simplified _aiBlock.
+    stack.push({ svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', width:9, margin:[0,0,0,4] });
     stack.push({ text:`${s.name||''} — ${content.type==='stage'?'Stage report':'Lifecycle report'}`, fontSize:18, bold:true, color:'#013d57' });
     const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
     if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
@@ -1044,7 +1052,7 @@ async function exportReport(){
     });
 
     const genAt=content.generated_at?new Date(content.generated_at).toLocaleString():'';
-    stack.push({ text:`Narrative sections are generated from server-scored results and the question blueprint${genAt?' · generated '+genAt:''}.`, fontSize:8, color:'#94a3b8', margin:[0,14,0,0] });
+    stack.push({ text:`Narrative sections are AI-generated from your results${genAt?' · '+genAt:''}.`, fontSize:8, color:'#94a3b8', margin:[0,14,0,0] });
 
     const docDef={ pageSize:'A4', pageMargins:[40,40,40,40], defaultStyle:{ fontSize:10, color:'#1e293b' }, content:stack };
     const who=(s.name||'report').replace(/[^a-z0-9]+/gi,'_');
