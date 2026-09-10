@@ -96,6 +96,25 @@
       both HTML and PDF). The summary paragraph itself now covers what the
       tiles used to show (assessment counts, baseline->endline change) as
       prose written by the Edge Function.
+
+   7. (follow-up) NO MORE AI SYNTHESIS FOR WPCAS. SECTION_HTML.wpcas and
+      SECTION_PDF.wpcas end right after the round chart(s) — the Edge
+      Function no longer sends a narrative for this section at all.
+
+   8. (follow-up) AI SYMBOL DOUBLED + LABELS SIMPLIFIED. Every ✦ that
+      precedes an AI-written paragraph (_aiBlock, the summary band) uses
+      the new `.ai-label.lg` modifier (21px, was 10.5px) instead of the
+      base .ai-label class — scoped this way so admin.js/participant.js's
+      demo-mode badges, which share the base class, are untouched. The PDF
+      side gained a matching ✦ diamond icon (_pdfDiamondSvg, 18px, was 9px
+      only on the summary band and absent everywhere else) so both outputs
+      show the same symbol at the same relative size.
+
+   9. (follow-up) SECOND-PERSON VOICE. No code change here — the Edge
+      Function now writes every narrative field directly to the learner
+      ("you"/"your") instead of naming them. Mentioned here only so this
+      file's behaviour (just rendering whatever text arrives) is understood
+      against the current backend contract.
    ============================================================ */
 
 /* keep the prototype implementations for DEMO mode (no backend) */
@@ -489,13 +508,14 @@ function _compTable(rows){
 
 // `label` is still accepted (call sites are unchanged, e.g. _aiBlock('AI
 // synthesis', ...)) but no longer displayed — every AI-written box now
-// shows just the ✦ symbol instead of a repeated "AI interpretation" /
-// "AI synthesis" / "AI-generated" pill on every single box.
+// shows just the ✦ symbol (at double size via the "lg" modifier) instead of
+// a repeated "AI interpretation" / "AI synthesis" / "AI-generated" pill on
+// every single box.
 function _aiBlock(label, text, teal){
   if(!text) return '';
   const style = teal ? ' style="border-color:var(--teal);background:#eef6f0"' : '';
   const lab   = teal ? ' style="background:#dcf0e3;color:#1f5b34"' : '';
-  return `<div class="ai-block"${style}><span class="ai-label"${lab}>✦</span>
+  return `<div class="ai-block"${style}><span class="ai-label lg"${lab}>✦</span>
     <p style="margin:8px 0 0">${rEsc(text)}</p></div>`;
 }
 
@@ -507,7 +527,7 @@ var SECTION_HTML = {
     // Edge Function from assessment_counts + technical_gain_pct) now covers
     // what those boxes used to show.
     return `<div class="summary-band"><div>
-      <div class="ai-label" style="background:rgba(255,255,255,.18);color:#fff">✦</div>
+      <div class="ai-label lg" style="background:rgba(255,255,255,.18);color:#fff">✦</div>
       <h1 style="color:#fff;margin:10px 0 4px">${rEsc(s.name||'')} — ${content.type==='stage'?'Stage report':'Lifecycle report'}</h1>
       <div style="opacity:.85;font-size:13px">${rEsc(s.meta||'')}${s.cohort_name?' · '+rEsc(s.cohort_name):''}</div></div>
       <p style="margin:14px 0 0;opacity:.95;max-width:600px">${rEsc(data.narrative||'')}</p></div>`;
@@ -546,7 +566,8 @@ var SECTION_HTML = {
   // case looks the same as before apart from the new chart. The old
   // "Derived from the ratings" box is gone — application_band/
   // development_focus may still arrive per round but this file no longer
-  // renders them.
+  // renders them. No AI synthesis paragraph any more either (v3 follow-up)
+  // — the section ends right after the chart(s).
   wpcas: function(data){
     const rounds=data.rounds||[];
     if(!rounds.length) return '';
@@ -571,7 +592,7 @@ var SECTION_HTML = {
       </div>`;
     }).join('');
 
-    return `${tabs}${panels}${_aiBlock('AI synthesis', data.narrative)}`;
+    return `${tabs}${panels}`;
   },
 
   // per_competency section REMOVED (v3) — no renderer needed; the Edge
@@ -906,9 +927,25 @@ function reportsRegenerate(pid, isAdmin){
    finished HTML — two things that could silently drift apart.
    ============================================================ */
 function _pdfH2(t, margin){ return { text:t, fontSize:13, bold:true, color:'#0f172a', margin: margin || [0,14,0,2] }; }
+/* Small ✦ diamond icon shared by the summary band and _pdfAI. v3 follow-up:
+   doubled from the original 9px to 18px, matching the HTML side's "lg"
+   .ai-label modifier — the fill colour is passed in so it matches whatever
+   accent colour a given box already uses (teal by default, green for
+   recommendations). */
+function _pdfDiamondSvg(fill){
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="18" height="18"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="${fill}"/></svg>`;
+}
+/* v3 follow-up: the PDF version of an AI-written paragraph had no ✦ symbol
+   at all before (just a coloured left border) — now it gets one too, so
+   the "double the AI symbol" change has something to apply to and the two
+   outputs stay visually consistent. */
 function _pdfAI(text, stroke, fill){
-  return { table:{ widths:['*'], body:[[{ text:text, fontSize:10, lineHeight:1.3, color:'#1e293b', margin:[8,6,8,6], fillColor: fill || '#e6f1f7' }]] },
-    layout:{ hLineWidth:()=>0, vLineWidth:(i)=> i===0 ? 3 : 0, vLineColor:()=> stroke || RCOLORS.primary }, margin:[0,4,0,0] };
+  const iconColor = stroke || RCOLORS.primary;
+  return { stack:[
+    { svg:_pdfDiamondSvg(iconColor), width:18, margin:[6,2,0,2] },
+    { table:{ widths:['*'], body:[[{ text:text, fontSize:10, lineHeight:1.3, color:'#1e293b', margin:[8,6,8,6], fillColor: fill || '#e6f1f7' }]] },
+      layout:{ hLineWidth:()=>0, vLineWidth:(i)=> i===0 ? 3 : 0, vLineColor:()=> stroke || RCOLORS.primary }, margin:[0,2,0,0] }
+  ], margin:[0,4,0,0] };
 }
 /* pdfmake wants no width attribute fighting its own sizing. */
 function _pdfCleanSvg(svg){
@@ -933,8 +970,9 @@ var SECTION_PDF = {
   summary: function(data, content, stack){
     const s=content.subject||{};
     // v3: just the ✦ diamond icon now, no "AI-GENERATED" text next to it —
-    // matches the HTML side's simplified _aiBlock.
-    stack.push({ svg:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="9" height="9"><path d="M6 0 L7.2 4.8 L12 6 L7.2 7.2 L6 12 L4.8 7.2 L0 6 L4.8 4.8 Z" fill="#016796"/></svg>', width:9, margin:[0,0,0,4] });
+    // matches the HTML side's simplified _aiBlock. Doubled to 18px (v3
+    // follow-up), same as the icon _pdfAI now uses.
+    stack.push({ svg:_pdfDiamondSvg('#016796'), width:18, margin:[0,0,0,4] });
     stack.push({ text:`${s.name||''} — ${content.type==='stage'?'Stage report':'Lifecycle report'}`, fontSize:18, bold:true, color:'#013d57' });
     const metaLine=[s.meta,s.cohort_name].filter(Boolean).join(' · ');
     if(metaLine) stack.push({ text:metaLine, fontSize:10, color:'#64748b', margin:[0,2,0,8] });
@@ -984,6 +1022,8 @@ var SECTION_PDF = {
   // every completed round is printed one after another, each labelled with
   // its round name when there's more than one. "Derived from the ratings"
   // (application_band/development_focus) is dropped, matching the HTML side.
+  // No AI synthesis paragraph any more either (v3 follow-up) — nothing is
+  // pushed after the last round's chart.
   wpcas: function(data, content, stack){
     stack.push(_pdfH2('WPCAS 360 ratings'));
     const rounds=data.rounds||[];
@@ -995,7 +1035,6 @@ var SECTION_PDF = {
       const svg=wpcaDotChartSVG(merged);
       if(svg) stack.push({ svg:_pdfCleanSvg(svg), width:420, alignment:'center', margin:[0,0,0,4] });
     });
-    if(data.narrative) stack.push(_pdfAI(data.narrative));
   },
 
   // per_competency section REMOVED (v3) — no builder needed.
