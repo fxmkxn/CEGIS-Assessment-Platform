@@ -110,11 +110,11 @@
       only on the summary band and absent everywhere else) so both outputs
       show the same symbol at the same relative size.
 
-   9. (follow-up) SECOND-PERSON VOICE. No code change here — the Edge
-      Function now writes every narrative field directly to the learner
-      ("you"/"your") instead of naming them. Mentioned here only so this
-      file's behaviour (just rendering whatever text arrives) is understood
-      against the current backend contract.
+   9. (follow-up, reverted) VOICE. No code change here either way — the
+      Edge Function briefly switched narrative text to second person, then
+      reverted back to third person (name + role) on request. Mentioned
+      here only so this file's behaviour (just rendering whatever text
+      arrives) is understood against the current backend contract.
    ============================================================ */
 
 /* keep the prototype implementations for DEMO mode (no backend) */
